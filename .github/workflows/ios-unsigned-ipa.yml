@@ -1,3 +1,4 @@
+
 name: Build iOS Unsigned IPA
 
 on:
@@ -36,10 +37,40 @@ jobs:
         working-directory: example
         run: flutter build ipa --release --no-codesign
 
+      # 手动将 Runner.app 打包成 IPA
+      - name: Package unsigned IPA
+        working-directory: example
+        run: |
+          set -e
+
+          APP_PATH="build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Error: Runner.app not found!"
+            exit 1
+          fi
+
+          mkdir -p build/ios/ipa/Payload
+
+          rm -rf build/ios/ipa/Payload/Runner.app
+          rm -f build/ios/ipa/Runner-unsigned.ipa
+
+          cp -R "$APP_PATH" build/ios/ipa/Payload/
+
+          cd build/ios/ipa
+
+          /usr/bin/zip -qry Runner-unsigned.ipa Payload
+
+          echo "IPA generated successfully:"
+          ls -lh Runner-unsigned.ipa
+
+          /usr/bin/unzip -t Runner-unsigned.ipa
+
+      # 上传 IPA 文件
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-unsigned-ipa
-          path: example/build/ios/ipa/*.ipa
+          path: example/build/ios/ipa/Runner-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
