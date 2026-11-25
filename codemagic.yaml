@@ -1,4 +1,5 @@
 
+
 workflows:
   ios_unsigned:
     name: YOLO Flutter iOS Build
@@ -30,26 +31,34 @@ workflows:
           set -e
 
           APP_PATH="$CM_BUILD_DIR/example/build/ios/iphoneos/Runner.app"
+          IPA_OUTPUT="$CM_BUILD_DIR/example/build/ios/ipa"
+          TEMP_DIR="$CM_BUILD_DIR/ipa_temp"
 
           if [ ! -d "$APP_PATH" ]; then
-            echo "Runner.app not found. Searching build directory..."
+            echo "ERROR: Runner.app not found"
             find "$CM_BUILD_DIR/example/build/ios" -name "Runner.app" -type d
             exit 1
           fi
 
-          IPA_DIR="$CM_BUILD_DIR/ipa"
-          mkdir -p "$IPA_DIR/Payload"
+          rm -rf "$TEMP_DIR"
+          mkdir -p "$TEMP_DIR/Payload"
+          mkdir -p "$IPA_OUTPUT"
 
-          cp -R "$APP_PATH" "$IPA_DIR/Payload/Runner.app"
+          cp -R "$APP_PATH" "$TEMP_DIR/Payload/Runner.app"
 
-          cd "$IPA_DIR"
-          zip -qry "$CM_BUILD_DIR/Runner.ipa" Payload
+          cd "$TEMP_DIR"
+          zip -qry "$IPA_OUTPUT/Runner.ipa" Payload
 
-          test -s "$CM_BUILD_DIR/Runner.ipa"
-          echo "IPA created successfully"
-          ls -lh "$CM_BUILD_DIR/Runner.ipa"
+          if [ ! -s "$IPA_OUTPUT/Runner.ipa" ]; then
+            echo "ERROR: IPA generation failed"
+            exit 1
+          fi
+
+          echo "IPA created successfully:"
+          ls -lh "$IPA_OUTPUT/Runner.ipa"
+
+          unzip -l "$IPA_OUTPUT/Runner.ipa"
 
     artifacts:
-      - Runner.ipa
-      - example/build/ios/iphoneos/**/*.app
+      - example/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
