@@ -4,6 +4,7 @@ workflows:
     name: YOLO Flutter iOS Build
     instance_type: mac_mini_m2
     max_build_duration: 60
+
     working_directory: example
 
     environment:
@@ -19,16 +20,36 @@ workflows:
         script: |
           cd ios
           pod install
+          cd ..
 
-      
+      - name: Build iOS without signing
+        script: flutter build ios --release --no-codesign
+
       - name: Package unsigned IPA
         script: |
-          cd build/ios/iphoneos
-          mkdir -p Payload
-          cp -R Runner.app Payload/
-          zip -r Runner.ipa Payload
+          set -e
+
+          APP_PATH="$CM_BUILD_DIR/example/build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Runner.app not found. Searching build directory..."
+            find "$CM_BUILD_DIR/example/build/ios" -name "Runner.app" -type d
+            exit 1
+          fi
+
+          IPA_DIR="$CM_BUILD_DIR/ipa"
+          mkdir -p "$IPA_DIR/Payload"
+
+          cp -R "$APP_PATH" "$IPA_DIR/Payload/Runner.app"
+
+          cd "$IPA_DIR"
+          zip -qry "$CM_BUILD_DIR/Runner.ipa" Payload
+
+          test -s "$CM_BUILD_DIR/Runner.ipa"
+          echo "IPA created successfully"
+          ls -lh "$CM_BUILD_DIR/Runner.ipa"
 
     artifacts:
-      - build/ios/iphoneos/Runner.ipa
+      - Runner.ipa
+      - example/build/ios/iphoneos/**/*.app
       - /tmp/xcodebuild_logs/*.log
-   
