@@ -1,5 +1,4 @@
 
-
 workflows:
   ios_unsigned:
     name: YOLO Flutter iOS Build
@@ -26,16 +25,11 @@ workflows:
       - name: Build iOS without signing
         script: flutter build ios --release --no-codesign
 
-      - name: Package unsigned IPA
+      - name: Prepare downloadable files
         script: |
           set -e
 
           APP_PATH="$CM_BUILD_DIR/example/build/ios/iphoneos/Runner.app"
-          TEMP_DIR="$CM_BUILD_DIR/.ipa_temp"
-          IPA_PATH="$CM_BUILD_DIR/Runner.ipa"
-
-          echo "Build directory: $CM_BUILD_DIR"
-          echo "Checking Runner.app..."
 
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: Runner.app not found"
@@ -43,35 +37,22 @@ workflows:
             exit 1
           fi
 
-          rm -rf "$TEMP_DIR"
-          rm -f "$IPA_PATH"
+          rm -rf "$CM_BUILD_DIR/Runner.app"
+          cp -R "$APP_PATH" "$CM_BUILD_DIR/Runner.app"
 
+          TEMP_DIR="$CM_BUILD_DIR/ipa_temp"
           mkdir -p "$TEMP_DIR/Payload"
-
           cp -R "$APP_PATH" "$TEMP_DIR/Payload/Runner.app"
 
           cd "$TEMP_DIR"
-          zip -qry "$IPA_PATH" Payload
+          zip -qry "$CM_BUILD_DIR/Runner.ipa" Payload
 
-          echo "Checking generated IPA..."
-
-          if [ ! -s "$IPA_PATH" ]; then
-            echo "ERROR: Runner.ipa was not generated"
-            exit 1
-          fi
-
-          echo "SUCCESS: IPA created"
-          ls -lh "$IPA_PATH"
-
-          echo "Checking IPA contents..."
-          unzip -t "$IPA_PATH"
-
-          echo "Final IPA location:"
-          echo "$IPA_PATH"
-
-          echo "All files:"
-          find "$CM_BUILD_DIR" -maxdepth 2 -name "*.ipa" -print
+          echo "Checking output files:"
+          ls -ld "$CM_BUILD_DIR/Runner.app"
+          ls -lh "$CM_BUILD_DIR/Runner.ipa"
+          unzip -t "$CM_BUILD_DIR/Runner.ipa"
 
     artifacts:
-      - Runner.ipa
+      - $CM_BUILD_DIR/Runner.app
+      - $CM_BUILD_DIR/Runner.ipa
       - /tmp/xcodebuild_logs/*.log
