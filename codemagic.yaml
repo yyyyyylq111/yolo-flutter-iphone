@@ -31,34 +31,47 @@ workflows:
           set -e
 
           APP_PATH="$CM_BUILD_DIR/example/build/ios/iphoneos/Runner.app"
-          IPA_OUTPUT="$CM_BUILD_DIR/example/build/ios/ipa"
-          TEMP_DIR="$CM_BUILD_DIR/ipa_temp"
+          TEMP_DIR="$CM_BUILD_DIR/.ipa_temp"
+          IPA_PATH="$CM_BUILD_DIR/Runner.ipa"
+
+          echo "Build directory: $CM_BUILD_DIR"
+          echo "Checking Runner.app..."
 
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: Runner.app not found"
-            find "$CM_BUILD_DIR/example/build/ios" -name "Runner.app" -type d
+            find "$CM_BUILD_DIR" -name "Runner.app" -type d
             exit 1
           fi
 
           rm -rf "$TEMP_DIR"
+          rm -f "$IPA_PATH"
+
           mkdir -p "$TEMP_DIR/Payload"
-          mkdir -p "$IPA_OUTPUT"
 
           cp -R "$APP_PATH" "$TEMP_DIR/Payload/Runner.app"
 
           cd "$TEMP_DIR"
-          zip -qry "$IPA_OUTPUT/Runner.ipa" Payload
+          zip -qry "$IPA_PATH" Payload
 
-          if [ ! -s "$IPA_OUTPUT/Runner.ipa" ]; then
-            echo "ERROR: IPA generation failed"
+          echo "Checking generated IPA..."
+
+          if [ ! -s "$IPA_PATH" ]; then
+            echo "ERROR: Runner.ipa was not generated"
             exit 1
           fi
 
-          echo "IPA created successfully:"
-          ls -lh "$IPA_OUTPUT/Runner.ipa"
+          echo "SUCCESS: IPA created"
+          ls -lh "$IPA_PATH"
 
-          unzip -l "$IPA_OUTPUT/Runner.ipa"
+          echo "Checking IPA contents..."
+          unzip -t "$IPA_PATH"
+
+          echo "Final IPA location:"
+          echo "$IPA_PATH"
+
+          echo "All files:"
+          find "$CM_BUILD_DIR" -maxdepth 2 -name "*.ipa" -print
 
     artifacts:
-      - example/build/ios/ipa/*.ipa
+      - Runner.ipa
       - /tmp/xcodebuild_logs/*.log
