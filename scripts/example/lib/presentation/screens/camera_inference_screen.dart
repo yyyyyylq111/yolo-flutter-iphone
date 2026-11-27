@@ -34,6 +34,162 @@ class _CameraInferenceScreenState
   Future<void>? _activeImport;
   double _fraction = 0;
 
+  // Each entry is one native inference-frame event, including its detections
+  // and frame-level timing/size metadata.
+  final List<Map<String, dynamic>> _inferenceFrames = <Map<String, dynamic>>[];
+  static const int _maxRecordedFrames = 20000;
+
+  void _onStreamingData(Map<String, dynamic> data) {
+    // Convert through JSON to detach the event map from any plugin-owned objects
+    // and ensure the eventual export contains JSON-safe values.
+    final detached = Map<String, dynamic>.from(
+      jsonDecode(jsonEncode(data)) as Map,
+    );
+    _inferenceFrames.add(detached);
+    if (_inferenceFrames.length > _maxRecordedFrames) {
+      _inferenceFrames.removeRange(
+        0,
+        _inferenceFrames.length - _maxRecordedFrames,
+      );
+    }
+  }
+
+  static String _csv(dynamic value) {
+    final text = (value ?? '').toString().replaceAll('"', '""');
+    if (text.contains(',') ||
+        text.contains('"') ||
+        text.contains('\n') ||
+        text.contains('\r')) {
+      return '"$text"';
+    }
+    return text;
+  }
+
+  static dynamic _firstValue(Map<dynamic, dynamic> map, List<String> keys) {
+    for (final key in keys) {
+      if (map[key] != null) return map[key];
+    }
+    return '';
+  }
+
+  Future<List<XFile>> _createCaptureExports(
+    Uint8List imageBytes,
+    List<Map<String, dynamic>> frames,
+  ) async {
+    final dir = await getTemporaryDirectory();
+    final stamp = DateTime.now().toUtc().toIso8601String()
+        .replaceAll(':', '-')
+        .replaceAll('.', '-');
+    final imageFile = File('${dir.path}/yolo_capture_$stamp.jpg');
+    final csvFile = File('${dir.path}/yolo_detections_$stamp.csv');
+    final jsonFile = File('${dir.path}/yolo_detections_$stamp.json');
+
+    await imageFile.writeAsBytes(imageBytes, flush: true);
+
+    const columns = <String>[
+      'frame_number',
+      'timestamp',
+      'fps',
+      'processing_time_ms',
+      'image_width',
+      'image_height',
+      'detection_index',
+      'class_name',
+      'class_index',
+      'confidence',
+      'bbox_json',
+      'detection_json',
+    ];
+    final csvLines = <String>[columns.join(',')];
+    var totalDetections = 0;
+
+    for (final frame in frames) {
+      final rawDetections = frame['detections'];
+      final detections = rawDetections is List
+          ? rawDetections.whereType<Map>().toList(growable: false)
+          : const <Map>[];
+      totalDetections += detections.length;
+
+      final frameValues = <String, dynamic>{
+        'frame_number': frame['frameNumber'] ?? frame['frame_number'] ?? '',
+        'timestamp': frame['timestamp'] ?? '',
+        'fps': frame['fps'] ?? '',
+        'processing_time_ms':
+            frame['processingTimeMs'] ?? frame['processing_time_ms'] ?? '',
+        'image_width': frame['imageWidth'] ?? frame['image_width'] ?? '',
+        'image_height': frame['imageHeight'] ?? frame['image_height'] ?? '',
+      };
+
+      if (detections.isEmpty) {
+        final row = <String, dynamic>{
+          ...frameValues,
+          'detection_index': '',
+          'class_name': '',
+          'class_index': '',
+          'confidence': '',
+          'bbox_json': '',
+          'detection_json': '',
+        };
+        csvLines.add(columns.map((key) => _csv(row[key])).join(','));
+        continue;
+      }
+
+      for (var index = 0; index < detections.length; index++) {
+        final detection = Map<String, dynamic>.from(detections[index]);
+        final row = <String, dynamic>{
+          ...frameValues,
+          'detection_index': index + 1,
+          'class_name': _firstValue(
+            detection,
+            ['className', 'class_name', 'label', 'name', 'class'],
+          ),
+          'class_index': _firstValue(
+            detection,
+            ['classIndex', 'class_index', 'classId', 'class_id'],
+          ),
+          'confidence': _firstValue(
+            detection,
+            ['confidence', 'conf', 'score'],
+          ),
+          'bbox_json': jsonEncode(
+            detection['boundingBox'] ??
+                detection['normalizedBox'] ??
+                detection['bbox'] ??
+                '',
+          ),
+          'detection_json': jsonEncode(detection),
+        };
+        csvLines.add(columns.map((key) => _csv(row[key])).join(','));
+      }
+    }
+
+    await csvFile.writeAsString(
+      '${csvLines.join('\n')}\n',
+      encoding: utf8,
+      flush: true,
+    );
+
+    final exportDocument = <String, dynamic>{
+      'schema_version': 1,
+      'exported_at': DateTime.now().toUtc().toIso8601String(),
+      'source': 'YOLOView real-time camera stream',
+      'recorded_frame_count': frames.length,
+      'total_detection_count': totalDetections,
+      'frames': frames,
+    };
+    await jsonFile.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(exportDocument),
+      encoding: utf8,
+      flush: true,
+    );
+
+    return <XFile>[
+      XFile(imageFile.path),
+      XFile(csvFile.path),
+      XFile(jsonFile.path),
+    ];
+  }
+
   @override
   void initState() {
     super.initState();
@@ -241,24 +397,36 @@ class _CameraInferenceScreenState
   }
 
   Future<void> _onCapture(Uint8List bytes) async {
-    final box = context.findRenderObject() as RenderBox?;
+    // Snapshot the frames at the moment the user taps Share. Later camera
+    // events must not change the data paired with this captured image.
+    final frames = _inferenceFrames
+        .map((frame) => Map<String, dynamic>.from(frame))
+        .toList(growable: false);
 
+    final box = context.findRenderObject() as RenderBox?;
     final origin = box != null && box.hasSize
         ? box.localToGlobal(Offset.zero) & box.size
         : null;
 
-    final dir = await getTemporaryDirectory();
+    try {
+      final files = await _createCaptureExports(bytes, frames);
+      if (!mounted) return;
 
-    final file = File('${dir.path}/yolo_capture.jpg')
-      ..writeAsBytesSync(bytes);
-
-    await SharePlus.instance.share(
-      ShareParams(
-        files: [XFile(file.path)],
-        text: 'Ultralytics YOLO',
-        sharePositionOrigin: origin,
-      ),
-    );
+      await SharePlus.instance.share(
+        ShareParams(
+          files: files,
+          text: 'YOLO real-time detection export '
+              '(${frames.length} inference frames)',
+          sharePositionOrigin: origin,
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $error')),
+        );
+      }
+    }
   }
 
   // Navigate to the existing single-image detection screen.
@@ -274,6 +442,7 @@ class _CameraInferenceScreenState
           YOLOShowcase(
             versionLabel: _versionLabel,
             onCapture: _onCapture,
+            onStreamingData: _onStreamingData,
             model: _model,
             onImportModel: _importModel,
           ),
