@@ -160,6 +160,9 @@ class _YOLOViewState extends State<YOLOView> {
       return;
     }
 
+    // Deliver raw frame data when requested, while keeping the typed detection and
+    // performance callbacks active. Consumers may need both raw export data and
+    // the existing parsed-result / FPS UI callbacks on the same frame.
     if (widget.onStreamingData != null) {
       try {
         final streamData = MapConverter.convertToTypedMap(event);
@@ -167,10 +170,10 @@ class _YOLOViewState extends State<YOLOView> {
       } catch (e) {
         logInfo('YOLOView: Error processing streaming data: $e');
       }
-    } else {
-      _handleDetectionResults(event);
-      _handlePerformanceMetrics(event);
     }
+
+    _handleDetectionResults(event);
+    _handlePerformanceMetrics(event);
   }
 
   void _handleDetectionResults(Map<dynamic, dynamic> event) {
