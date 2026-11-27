@@ -39,6 +39,9 @@ class YOLOShowcase extends StatefulWidget {
   /// Invoked with a composited JPEG when the user taps the share button.
   final void Function(Uint8List bytes)? onCapture;
 
+  /// Receives the raw per-frame inference payload from YOLOView.
+  final ValueChanged<Map<String, dynamic>>? onStreamingData;
+
   /// Optional controller; one is created internally if `null`.
   final YOLOViewController? controller;
 
@@ -61,6 +64,7 @@ class YOLOShowcase extends StatefulWidget {
     this.initialModelSize = 'n',
     this.showSemanticTask = true,
     this.onCapture,
+    this.onStreamingData,
     this.controller,
     this.theme,
     this.versionLabel,
@@ -798,6 +802,7 @@ class _YOLOShowcaseState extends State<YOLOShowcase> {
                   task: _currentTask,
                   controller: _controller,
                   onPerformanceMetrics: _onPerformanceMetrics,
+                  onStreamingData: widget.onStreamingData,
                   onModelError: _onModelError,
                   onModelLoad: _onModelLoaded,
                 ),
