@@ -2,6 +2,7 @@
 
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -31,7 +32,6 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
   bool _isExporting = false;
   String? _versionLabel;
   String? _lastImageId;
-  String? _lastImageExtension;
   double? _lastLatencyMs;
 
   @override
@@ -65,6 +65,216 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
     }
   }
 
+
+  /// Renders the detection boxes and labels into a real PNG image.
+  /// Uses normalized coordinates when available so boxes stay aligned with
+  /// the decoded image dimensions.
+  Future<Uint8List> _renderAnnotatedImage(
+    Uint8List sourceBytes,
+    List<Map<String, dynamic>> detections,
+  ) async {
+    final codec = await ui.instantiateImageCodec(sourceBytes);
+    final frame = await codec.getNextFrame();
+    final sourceImage = frame.image;
+
+    try {
+      final width = sourceImage.width;
+      final height = sourceImage.height;
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(
+        recorder,
+        Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      );
+
+      canvas.drawImage(
+        sourceImage,
+        Offset.zero,
+        Paint()..filterQuality = FilterQuality.high,
+      );
+
+      final boxPaint = Paint()
+        ..color = const Color(0xFF00E676)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = (width < height ? width : height) * 0.006;
+
+      final labelBackgroundPaint = Paint()
+        ..color = const Color(0xDD00A85A)
+        ..style = PaintingStyle.fill;
+
+      final strokeWidth = boxPaint.strokeWidth.clamp(2.0, 6.0).toDouble();
+
+      for (final detection in detections) {
+        final coordinates = _detectionRect(detection, width, height);
+        if (coordinates == null) continue;
+
+        final rect = coordinates;
+        canvas.drawRect(rect, boxPaint);
+
+        final className = (detection['class_name'] ??
+                detection['className'] ??
+                detection['label'] ??
+                detection['name'] ??
+                detection['class'] ??
+                'object')
+            .toString();
+        final confidenceValue = detection['confidence'] ??
+            detection['conf'] ??
+            detection['score'];
+        final confidence = confidenceValue is num
+            ? '${(confidenceValue * 100).toStringAsFixed(1)}%'
+            : '';
+        final label = confidence.isEmpty
+            ? className
+            : '$className $confidence';
+
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: TextStyle(
+              color: const Color(0xFFFFFFFF),
+              fontSize: (width * 0.025).clamp(12.0, 22.0).toDouble(),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+          maxLines: 1,
+        )..layout(maxWidth: width.toDouble());
+
+        final horizontalPadding = strokeWidth * 1.5;
+        final verticalPadding = strokeWidth;
+        final labelWidth = textPainter.width + horizontalPadding * 2;
+        final labelHeight = textPainter.height + verticalPadding * 2;
+        final labelLeft = rect.left
+            .clamp(
+              0.0,
+              (width - labelWidth).clamp(0.0, width.toDouble()),
+            )
+            .toDouble();
+        final labelTop = (rect.top - labelHeight)
+            .clamp(
+              0.0,
+              (height - labelHeight).clamp(0.0, height.toDouble()),
+            )
+            .toDouble();
+
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(labelLeft, labelTop, labelWidth, labelHeight),
+            const Radius.circular(3),
+          ),
+          labelBackgroundPaint,
+        );
+        textPainter.paint(
+          canvas,
+          Offset(labelLeft + horizontalPadding, labelTop + verticalPadding),
+        );
+      }
+
+      final picture = recorder.endRecording();
+      final renderedImage = await picture.toImage(width, height);
+      try {
+        final byteData = await renderedImage.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+        if (byteData == null) {
+          throw StateError('Could not encode annotated image as PNG.');
+        }
+        return byteData.buffer.asUint8List(
+          byteData.offsetInBytes,
+          byteData.lengthInBytes,
+        );
+      } finally {
+        renderedImage.dispose();
+        picture.dispose();
+      }
+    } finally {
+      sourceImage.dispose();
+      codec.dispose();
+    }
+  }
+
+  Rect? _detectionRect(
+    Map<String, dynamic> detection,
+    int imageWidth,
+    int imageHeight,
+  ) {
+    final normalized = detection['normalizedBox'];
+    List<num>? values;
+
+    if (normalized is List && normalized.length >= 4) {
+      final parsed = normalized.take(4).map(_asNum).toList();
+      if (parsed.every((value) => value != null)) {
+        values = parsed.cast<num>();
+        final left = (values[0] * imageWidth).toDouble();
+        final top = (values[1] * imageHeight).toDouble();
+        final right = (values[2] * imageWidth).toDouble();
+        final bottom = (values[3] * imageHeight).toDouble();
+        return _clampedRect(left, top, right, bottom, imageWidth, imageHeight);
+      }
+    }
+
+    final rawBox = detection['boundingBox'] ??
+        detection['bounding_box'] ??
+        detection['bbox'] ??
+        detection['box'];
+
+    if (rawBox is Map) {
+      final left = _asNum(rawBox['left'] ?? rawBox['x1'] ?? rawBox['x_min']);
+      final top = _asNum(rawBox['top'] ?? rawBox['y1'] ?? rawBox['y_min']);
+      final right =
+          _asNum(rawBox['right'] ?? rawBox['x2'] ?? rawBox['x_max']);
+      final bottom =
+          _asNum(rawBox['bottom'] ?? rawBox['y2'] ?? rawBox['y_max']);
+      if (left != null && top != null && right != null && bottom != null) {
+        return _clampedRect(
+          left.toDouble(),
+          top.toDouble(),
+          right.toDouble(),
+          bottom.toDouble(),
+          imageWidth,
+          imageHeight,
+        );
+      }
+    } else if (rawBox is List && rawBox.length >= 4) {
+      final parsed = rawBox.take(4).map(_asNum).toList();
+      if (parsed.every((value) => value != null)) {
+        final box = parsed.cast<num>();
+        return _clampedRect(
+          box[0].toDouble(),
+          box[1].toDouble(),
+          box[2].toDouble(),
+          box[3].toDouble(),
+          imageWidth,
+          imageHeight,
+        );
+      }
+    }
+
+    return null;
+  }
+
+  num? _asNum(dynamic value) {
+    if (value is num) return value;
+    if (value is String) return num.tryParse(value);
+    return null;
+  }
+
+  Rect? _clampedRect(
+    double left,
+    double top,
+    double right,
+    double bottom,
+    int imageWidth,
+    int imageHeight,
+  ) {
+    final x1 = left.clamp(0.0, imageWidth.toDouble()).toDouble();
+    final y1 = top.clamp(0.0, imageHeight.toDouble()).toDouble();
+    final x2 = right.clamp(0.0, imageWidth.toDouble()).toDouble();
+    final y2 = bottom.clamp(0.0, imageHeight.toDouble()).toDouble();
+    if (x2 <= x1 || y2 <= y1) return null;
+    return Rect.fromLTRB(x1, y1, x2, y2);
+  }
+
   Future<void> _pickAndPredict() async {
     if (!_isModelReady || _isInferring || _isExporting) return;
 
@@ -74,7 +284,6 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
 
       final bytes = await file.readAsBytes();
       final imageId = _imageIdFromFile(file);
-      final extension = _extensionFromName(file.name);
 
       setState(() {
         _isInferring = true;
@@ -82,7 +291,6 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
         _annotatedImage = null;
         _detections = const [];
         _lastImageId = imageId;
-        _lastImageExtension = extension;
         _lastLatencyMs = null;
       });
 
@@ -96,9 +304,18 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
           .map((item) => YOLOResult.fromMap(item))
           .toList(growable: false);
 
+      // Render the annotation locally from the original pixels and the
+      // returned boxes. This guarantees the exported image contains boxes
+      // even when the native YOLO plugin does not return annotatedImage.
+      final annotatedImage = await _renderAnnotatedImage(
+        bytes,
+        output.detections,
+      );
+
+      if (!mounted) return;
       setState(() {
         _detections = detections;
-        _annotatedImage = output.annotatedImage;
+        _annotatedImage = annotatedImage;
         _lastLatencyMs = output.latencyMs;
         _isInferring = false;
       });
@@ -116,36 +333,6 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
     return stem.isEmpty
         ? 'img_${DateTime.now().millisecondsSinceEpoch}'
         : stem;
-  }
-
-  String _extensionFromName(String name) {
-    final dot = name.lastIndexOf('.');
-    if (dot < 0 || dot == name.length - 1) return 'jpg';
-    final extension = name.substring(dot + 1).toLowerCase();
-    const supported = {'jpg', 'jpeg', 'png', 'webp', 'heic'};
-    return supported.contains(extension) ? extension : 'jpg';
-  }
-
-  String _extensionFromBytes(Uint8List bytes, {String fallback = 'jpg'}) {
-    if (bytes.length >= 8 &&
-        bytes[0] == 0x89 &&
-        bytes[1] == 0x50 &&
-        bytes[2] == 0x4E &&
-        bytes[3] == 0x47) {
-      return 'png';
-    }
-    if (bytes.length >= 3 &&
-        bytes[0] == 0xFF &&
-        bytes[1] == 0xD8 &&
-        bytes[2] == 0xFF) {
-      return 'jpg';
-    }
-    if (bytes.length >= 12 &&
-        String.fromCharCodes(bytes.sublist(0, 4)) == 'RIFF' &&
-        String.fromCharCodes(bytes.sublist(8, 12)) == 'WEBP') {
-      return 'webp';
-    }
-    return fallback;
   }
 
   String _mimeType(String extension) {
@@ -171,6 +358,10 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
       _showSnackBar('Run an image inference before exporting.');
       return;
     }
+    if (_annotatedImage == null) {
+      _showSnackBar('标注图片尚未生成，请重新运行图片检测后再导出。');
+      return;
+    }
 
     setState(() => _isExporting = true);
 
@@ -178,14 +369,10 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
       // Write the CSV and JSON records first.
       final resultFiles = await _localService.exportResults();
 
-      // Prefer the image with YOLO boxes. Fall back to the original image.
-      final imageBytes = _annotatedImage ?? _imageBytes!;
-      final imageExtension = _extensionFromBytes(
-        imageBytes,
-        fallback: _annotatedImage == null
-            ? (_lastImageExtension ?? 'jpg')
-            : 'jpg',
-      );
+      // Export only the rendered, annotated PNG. Never silently substitute
+      // the original unannotated photo.
+      final imageBytes = _annotatedImage!;
+      const imageExtension = 'png';
 
       final tempDir = await getTemporaryDirectory();
       final safeImageId = _lastImageId!.replaceAll(
