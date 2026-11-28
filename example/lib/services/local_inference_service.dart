@@ -47,7 +47,19 @@ class LocalInferenceService {
   final List<Map<String, dynamic>> _rows = [];
   final List<Map<String, dynamic>> _documents = [];
 
-  int get recordedRunCount => _rows.length;
+  int get recordedRunCount => _documents.length;
+
+  int get successfulRunCount =>
+      _documents.where((item) => item['success'] == true).length;
+
+  int get failedRunCount =>
+      _documents.where((item) => item['success'] != true).length;
+
+  int get totalDetectionCount => _documents.fold<int>(
+        0,
+        (total, item) =>
+            total + ((item['detection_count'] as num?)?.toInt() ?? 0),
+      );
 
   Future<void> initialize() async {
     if (_ready) return;
@@ -88,6 +100,7 @@ class LocalInferenceService {
         startedAt: startedAt,
         completedAt: completedAt,
         elapsedMs: elapsed,
+        requestBytes: imageBytes.length,
         success: true,
         detectionCount: detections.length,
       ));
@@ -102,6 +115,7 @@ class LocalInferenceService {
         'completed_at': completedAt.toIso8601String(),
         'latency_ms': _rounded(elapsed),
         'inference_ms': _rounded(elapsed),
+        'request_bytes': imageBytes.length,
         'success': true,
         'detection_count': detections.length,
         'detections': detections,
@@ -124,6 +138,7 @@ class LocalInferenceService {
         startedAt: startedAt,
         completedAt: completedAt,
         elapsedMs: elapsed,
+        requestBytes: imageBytes.length,
         success: false,
         detectionCount: 0,
       ));
@@ -138,6 +153,7 @@ class LocalInferenceService {
         'completed_at': completedAt.toIso8601String(),
         'latency_ms': _rounded(elapsed),
         'inference_ms': _rounded(elapsed),
+        'request_bytes': imageBytes.length,
         'success': false,
         'detection_count': 0,
         'detections': <Map<String, dynamic>>[],
@@ -153,6 +169,7 @@ class LocalInferenceService {
     required DateTime startedAt,
     required DateTime completedAt,
     required double elapsedMs,
+    required int requestBytes,
     required bool success,
     required int detectionCount,
   }) {
@@ -167,7 +184,7 @@ class LocalInferenceService {
       'latency_ms': _rounded(elapsedMs),
       // predict() is one plugin operation; native sub-stages are not exposed.
       'inference_ms': _rounded(elapsedMs),
-      'request_bytes': 0,
+      'request_bytes': requestBytes,
       'success': success,
       'detection_count': detectionCount,
     };
@@ -208,6 +225,10 @@ class LocalInferenceService {
       'bbox_y1',
       'bbox_x2',
       'bbox_y2',
+      'bbox_x1_normalized',
+      'bbox_y1_normalized',
+      'bbox_x2_normalized',
+      'bbox_y2_normalized',
       'bbox_json',
       'detection_json',
     ];
@@ -231,6 +252,10 @@ class LocalInferenceService {
           'bbox_y1': '',
           'bbox_x2': '',
           'bbox_y2': '',
+          'bbox_x1_normalized': '',
+          'bbox_y1_normalized': '',
+          'bbox_x2_normalized': '',
+          'bbox_y2_normalized': '',
           'bbox_json': '',
           'detection_json': '',
         };
@@ -241,6 +266,7 @@ class LocalInferenceService {
       for (var index = 0; index < detections.length; index++) {
         final detection = Map<String, dynamic>.from(detections[index]);
         final box = _bboxValues(detection['bbox']);
+        final normalizedBox = _bboxValues(detection['normalizedBox']);
         final row = <String, dynamic>{
           ...document,
           'detection_index': index + 1,
@@ -251,6 +277,10 @@ class LocalInferenceService {
           'bbox_y1': box[1],
           'bbox_x2': box[2],
           'bbox_y2': box[3],
+          'bbox_x1_normalized': normalizedBox[0],
+          'bbox_y1_normalized': normalizedBox[1],
+          'bbox_x2_normalized': normalizedBox[2],
+          'bbox_y2_normalized': normalizedBox[3],
           'bbox_json': detection['bbox'] == null
               ? ''
               : jsonEncode(detection['bbox']),
@@ -260,8 +290,9 @@ class LocalInferenceService {
       }
     }
 
+    // UTF-8 BOM improves Chinese text compatibility when opening CSV in Excel.
     await csv.writeAsString(
-      '${csvLines.join('\n')}\n',
+      '\uFEFF${csvLines.join('\n')}\n',
       encoding: utf8,
       flush: true,
     );
@@ -272,15 +303,9 @@ class LocalInferenceService {
       'device_id': deviceId,
       'network': network,
       'run_count': _documents.length,
-      'successful_run_count':
-          _documents.where((item) => item['success'] == true).length,
-      'failed_run_count':
-          _documents.where((item) => item['success'] != true).length,
-      'total_detection_count': _documents.fold<int>(
-        0,
-        (total, item) =>
-            total + ((item['detection_count'] as num?)?.toInt() ?? 0),
-      ),
+      'successful_run_count': successfulRunCount,
+      'failed_run_count': failedRunCount,
+      'total_detection_count': totalDetectionCount,
       'runs': _documents,
     };
 
@@ -320,6 +345,11 @@ class LocalInferenceService {
 
     final normalizedBox = _normalizeBox(rawBox);
     if (normalizedBox != null) out['bbox'] = normalizedBox;
+
+    final rawNormalizedBox = _normalizeBox(raw['normalizedBox']);
+    if (rawNormalizedBox != null) {
+      out['normalizedBox'] = rawNormalizedBox;
+    }
     return out;
   }
 

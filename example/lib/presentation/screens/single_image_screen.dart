@@ -218,7 +218,11 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
 
       if (!mounted) return;
       if (shareResult.status == ShareResultStatus.unavailable) {
-        _showSnackBar('The iOS share sheet is unavailable.');
+        _showSnackBar('iOS 分享面板不可用，请检查系统分享功能。');
+      } else if (shareResult.status == ShareResultStatus.success) {
+        _showSnackBar('分享操作已完成。如果刚才选择了“存储到文件”，请在“文件”App 中查看。');
+      } else {
+        _showSnackBar('分享面板已关闭；如未保存文件，可再次点击导出。');
       }
     } catch (error) {
       if (mounted) _showSnackBar('Export failed: $error');
@@ -252,7 +256,7 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
         title: const Text('Single Image Inference'),
         actions: [
           IconButton(
-            tooltip: 'Share CSV, JSON and detected image',
+            tooltip: '导出 CSV、JSON 和检测图片',
             onPressed: canExport ? _exportResults : null,
             icon: _isExporting
                 ? const SizedBox(
@@ -269,7 +273,7 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
           Column(
             children: [
               Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
                 child: SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
@@ -278,6 +282,27 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
                         : null,
                     icon: const Icon(Icons.photo_library_outlined),
                     label: const Text('Pick image & run inference'),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: canExport ? _exportResults : null,
+                    icon: _isExporting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.file_download_outlined),
+                    label: Text(
+                      _isExporting
+                          ? '正在生成测试数据...'
+                          : '导出测试数据（CSV + JSON）',
+                    ),
                   ),
                 ),
               ),
@@ -358,8 +383,11 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
                       Padding(
                         padding: const EdgeInsets.all(16),
                         child: Text(
-                          'Recorded runs: ${_localService.recordedRunCount}. '
-                          'Tap the share icon above to export CSV, JSON and the detected image.',
+                          '当前会话已记录 ${_localService.recordedRunCount} 次图片检测，'
+                          '成功 ${_localService.successfulRunCount} 次，'
+                          '失败 ${_localService.failedRunCount} 次，'
+                          '共检测到 ${_localService.totalDetectionCount} 个目标。'
+                          '\n点击“导出测试数据”可通过 iPhone 分享面板保存 CSV、JSON 和标注图片。',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
