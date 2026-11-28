@@ -33,6 +33,10 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
   String? _versionLabel;
   String? _lastImageId;
   double? _lastLatencyMs;
+  int? _lastImageWidth;
+  int? _lastImageHeight;
+  double? _lastEndToEndMs;
+  double? _lastAnnotationMs;
 
   @override
   void initState() {
@@ -275,6 +279,20 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
     return Rect.fromLTRB(x1, y1, x2, y2);
   }
 
+  Future<({int width, int height})> _readImageDimensions(
+    Uint8List bytes,
+  ) async {
+    final codec = await ui.instantiateImageCodec(bytes);
+    try {
+      final frame = await codec.getNextFrame();
+      final dimensions = (width: frame.image.width, height: frame.image.height);
+      frame.image.dispose();
+      return dimensions;
+    } finally {
+      codec.dispose();
+    }
+  }
+
   Future<void> _pickAndPredict() async {
     if (!_isModelReady || _isInferring || _isExporting) return;
 
@@ -282,7 +300,9 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
       final file = await _picker.pickImage(source: ImageSource.gallery);
       if (file == null || !mounted) return;
 
+      final endToEndWatch = Stopwatch()..start();
       final bytes = await file.readAsBytes();
+      final dimensions = await _readImageDimensions(bytes);
       final imageId = _imageIdFromFile(file);
 
       setState(() {
@@ -292,6 +312,10 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
         _detections = const [];
         _lastImageId = imageId;
         _lastLatencyMs = null;
+        _lastEndToEndMs = null;
+        _lastAnnotationMs = null;
+        _lastImageWidth = dimensions.width;
+        _lastImageHeight = dimensions.height;
       });
 
       final output = await _localService.inferLocal(
@@ -307,9 +331,24 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
       // Render the annotation locally from the original pixels and the
       // returned boxes. This guarantees the exported image contains boxes
       // even when the native YOLO plugin does not return annotatedImage.
+      final annotationWatch = Stopwatch()..start();
       final annotatedImage = await _renderAnnotatedImage(
         bytes,
         output.detections,
+      );
+      annotationWatch.stop();
+      endToEndWatch.stop();
+      final annotationMs = annotationWatch.elapsedMicroseconds / 1000.0;
+      final endToEndMs = endToEndWatch.elapsedMicroseconds / 1000.0;
+      _localService.completeRunMetrics(
+        requestId: output.requestId,
+        endToEndMs: endToEndMs,
+        imageWidth: dimensions.width,
+        imageHeight: dimensions.height,
+        annotationMs: annotationMs,
+        imageFormat: file.name.contains('.')
+            ? file.name.split('.').last.toLowerCase()
+            : 'unknown',
       );
 
       if (!mounted) return;
@@ -317,6 +356,8 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
         _detections = detections;
         _annotatedImage = annotatedImage;
         _lastLatencyMs = output.latencyMs;
+        _lastEndToEndMs = endToEndMs;
+        _lastAnnotationMs = annotationMs;
         _isInferring = false;
       });
     } catch (error) {
@@ -524,8 +565,26 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      Text('${_lastLatencyMs!.toStringAsFixed(2)} ms'),
+                      Text('推理 ${_lastLatencyMs!.toStringAsFixed(1)} ms'),
                     ],
+                  ),
+                ),
+              if (_lastEndToEndMs != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                  child: Text(
+                    '端到端 ${_lastEndToEndMs!.toStringAsFixed(1)} ms  |  '
+                    '标注 ${_lastAnnotationMs!.toStringAsFixed(1)} ms  |  '
+                    '${_lastImageWidth}×${_lastImageHeight}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              if (_lastLatencyMs != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                  child: Text(
+                    '当前推理 FPS：${(1000.0 / _lastLatencyMs!).toStringAsFixed(2)}',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
               Expanded(
@@ -574,6 +633,7 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
                           '成功 ${_localService.successfulRunCount} 次，'
                           '失败 ${_localService.failedRunCount} 次，'
                           '共检测到 ${_localService.totalDetectionCount} 个目标。'
+                          '平均推理 FPS：${_localService.averageFps.toStringAsFixed(2)}。'
                           '\n点击“导出测试数据”可通过 iPhone 分享面板保存 CSV、JSON 和标注图片。',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
