@@ -9,7 +9,6 @@ import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 import 'package:ultralytics_yolo_example/services/local_inference_service.dart';
 
@@ -24,7 +23,7 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
   final _picker = ImagePicker();
   late final LocalInferenceService _localService;
 
-  List<YOLOResult> _detections = const [];
+  List<Map<String, dynamic>> _detections = const [];
   Uint8List? _imageBytes;
   Uint8List? _annotatedImage;
   bool _isModelReady = false;
@@ -203,58 +202,105 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
     int imageHeight,
   ) {
     final normalized = detection['normalizedBox'];
-    List<num>? values;
-
     if (normalized is List && normalized.length >= 4) {
-      final parsed = normalized.take(4).map(_asNum).toList();
-      if (parsed.every((value) => value != null)) {
-        values = parsed.cast<num>();
-        final left = (values[0] * imageWidth).toDouble();
-        final top = (values[1] * imageHeight).toDouble();
-        final right = (values[2] * imageWidth).toDouble();
-        final bottom = (values[3] * imageHeight).toDouble();
-        return _clampedRect(left, top, right, bottom, imageWidth, imageHeight);
-      }
-    }
-
-    final rawBox = detection['boundingBox'] ??
-        detection['bounding_box'] ??
-        detection['bbox'] ??
-        detection['box'];
-
-    if (rawBox is Map) {
-      final left = _asNum(rawBox['left'] ?? rawBox['x1'] ?? rawBox['x_min']);
-      final top = _asNum(rawBox['top'] ?? rawBox['y1'] ?? rawBox['y_min']);
-      final right =
-          _asNum(rawBox['right'] ?? rawBox['x2'] ?? rawBox['x_max']);
-      final bottom =
-          _asNum(rawBox['bottom'] ?? rawBox['y2'] ?? rawBox['y_max']);
-      if (left != null && top != null && right != null && bottom != null) {
-        return _clampedRect(
-          left.toDouble(),
-          top.toDouble(),
-          right.toDouble(),
-          bottom.toDouble(),
+      final values = normalized.take(4).map(_asNum).toList();
+      if (values.every((value) => value != null)) {
+        return _rectFromValues(
+          values.cast<num>(),
           imageWidth,
           imageHeight,
-        );
-      }
-    } else if (rawBox is List && rawBox.length >= 4) {
-      final parsed = rawBox.take(4).map(_asNum).toList();
-      if (parsed.every((value) => value != null)) {
-        final box = parsed.cast<num>();
-        return _clampedRect(
-          box[0].toDouble(),
-          box[1].toDouble(),
-          box[2].toDouble(),
-          box[3].toDouble(),
-          imageWidth,
-          imageHeight,
+          normalized: true,
         );
       }
     }
 
+    // Check all supported box keys. Some plugin versions return a List,
+    // while others return a Map; do not assume one representation.
+    final candidates = <dynamic>[
+      detection['bbox'],
+      detection['boundingBox'],
+      detection['bounding_box'],
+      detection['box'],
+    ];
+    for (final rawBox in candidates) {
+      if (rawBox is List && rawBox.length >= 4) {
+        final values = rawBox.take(4).map(_asNum).toList();
+        if (values.every((value) => value != null)) {
+          final numbers = values.cast<num>();
+          final looksNormalized = numbers.every(
+            (value) => value >= 0 && value <= 1,
+          );
+          final rect = _rectFromValues(
+            numbers,
+            imageWidth,
+            imageHeight,
+            normalized: looksNormalized,
+          );
+          if (rect != null) return rect;
+        }
+      } else if (rawBox is Map) {
+        final left = _asNum(rawBox['left'] ?? rawBox['x1'] ?? rawBox['x_min']);
+        final top = _asNum(rawBox['top'] ?? rawBox['y1'] ?? rawBox['y_min']);
+        final right = _asNum(rawBox['right'] ?? rawBox['x2'] ?? rawBox['x_max']);
+        final bottom =
+            _asNum(rawBox['bottom'] ?? rawBox['y2'] ?? rawBox['y_max']);
+
+        if (left != null && top != null && right != null && bottom != null) {
+          final values = [left, top, right, bottom];
+          final looksNormalized = values.every(
+            (value) => value >= 0 && value <= 1,
+          );
+          final rect = _rectFromValues(
+            values,
+            imageWidth,
+            imageHeight,
+            normalized: looksNormalized,
+          );
+          if (rect != null) return rect;
+        }
+
+        // Also support center/size or top-left/size box formats.
+        final x = _asNum(rawBox['x'] ?? rawBox['cx']);
+        final y = _asNum(rawBox['y'] ?? rawBox['cy']);
+        final boxWidth = _asNum(rawBox['width'] ?? rawBox['w']);
+        final boxHeight = _asNum(rawBox['height'] ?? rawBox['h']);
+        if (x != null && y != null && boxWidth != null && boxHeight != null) {
+          final isCenter = rawBox.containsKey('cx') || rawBox.containsKey('cy');
+          final x1 = isCenter ? x - boxWidth / 2 : x;
+          final y1 = isCenter ? y - boxHeight / 2 : y;
+          final values = [x1, y1, x1 + boxWidth, y1 + boxHeight];
+          final looksNormalized = values.every(
+            (value) => value >= 0 && value <= 1,
+          );
+          final rect = _rectFromValues(
+            values,
+            imageWidth,
+            imageHeight,
+            normalized: looksNormalized,
+          );
+          if (rect != null) return rect;
+        }
+      }
+    }
     return null;
+  }
+
+  Rect? _rectFromValues(
+    List<num> values,
+    int imageWidth,
+    int imageHeight, {
+    required bool normalized,
+  }) {
+    final scaleX = normalized ? imageWidth.toDouble() : 1.0;
+    final scaleY = normalized ? imageHeight.toDouble() : 1.0;
+    return _clampedRect(
+      values[0].toDouble() * scaleX,
+      values[1].toDouble() * scaleY,
+      values[2].toDouble() * scaleX,
+      values[3].toDouble() * scaleY,
+      imageWidth,
+      imageHeight,
+    );
   }
 
   num? _asNum(dynamic value) {
@@ -324,9 +370,10 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
       );
 
       if (!mounted) return;
-      final detections = output.detections
-          .map((item) => YOLOResult.fromMap(item))
-          .toList(growable: false);
+      // The service has already normalized each detection map. Keep these
+      // maps directly instead of calling YOLOResult.fromMap(), whose plugin
+      // parser can fail when a bounding-box field is represented as a List.
+      final detections = output.detections;
 
       // Render the annotation locally from the original pixels and the
       // returned boxes. This guarantees the exported image contains boxes
@@ -457,6 +504,12 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
+  }
+
+  String _confidencePercent(dynamic value) {
+    final confidence = value is num ? value : num.tryParse(value?.toString() ?? '');
+    if (confidence == null) return '—';
+    return '${(confidence * 100).toStringAsFixed(1)}%';
   }
 
   void _showSnackBar(String message) {
@@ -615,9 +668,17 @@ class _SingleImageScreenState extends State<SingleImageScreen> {
                       ListTile(
                         dense: true,
                         leading: const Icon(Icons.crop_din),
-                        title: Text(detection.className),
+                        title: Text(
+                          (detection['class_name'] ??
+                                  detection['className'] ??
+                                  detection['label'] ??
+                                  detection['name'] ??
+                                  detection['class'] ??
+                                  'object')
+                              .toString(),
+                        ),
                         trailing: Text(
-                          '${(detection.confidence * 100).toStringAsFixed(1)}%',
+                          '${_confidencePercent(detection['confidence'] ?? detection['conf'] ?? detection['score'])}',
                         ),
                       ),
                     if (_detections.isEmpty && displayedImage != null)
