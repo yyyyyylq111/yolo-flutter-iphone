@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
@@ -14,12 +15,14 @@ class LocalInferenceOutput {
     required this.detections,
     required this.annotatedImage,
     required this.latencyMs,
+    required this.requestId,
   });
 
   final String imageId;
   final List<Map<String, dynamic>> detections;
   final Uint8List? annotatedImage;
   final double latencyMs;
+  final String requestId;
 }
 
 class LocalExportFiles {
@@ -40,6 +43,9 @@ class LocalInferenceService {
   final String network;
   final YOLO _yolo;
 
+  static const MethodChannel _performanceChannel =
+      MethodChannel('com.ultralytics.yolo_example/performance');
+
   bool _ready = false;
   bool get isReady => _ready;
 
@@ -54,6 +60,44 @@ class LocalInferenceService {
 
   int get failedRunCount =>
       _documents.where((item) => item['success'] != true).length;
+
+  double get totalInferenceSeconds => _documents.fold<double>(
+        0,
+        (total, item) =>
+            total + (((item['inference_ms'] as num?)?.toDouble() ?? 0) / 1000),
+      );
+
+  double get averageFps {
+    final seconds = totalInferenceSeconds;
+    return seconds <= 0 ? 0 : successfulRunCount / seconds;
+  }
+
+  double get totalEndToEndSeconds => _documents.fold<double>(
+        0,
+        (total, item) =>
+            total + (((item['end_to_end_ms'] as num?)?.toDouble() ??
+                    (item['inference_ms'] as num?)?.toDouble() ??
+                    0) /
+                1000),
+      );
+
+  double get averageThroughput {
+    final seconds = totalEndToEndSeconds;
+    return seconds <= 0 ? 0 : successfulRunCount / seconds;
+  }
+
+  Future<Map<String, dynamic>?> _readProcessMetrics() async {
+    if (!Platform.isIOS) return null;
+    try {
+      final value = await _performanceChannel.invokeMapMethod<String, dynamic>(
+        'getProcessMetrics',
+      );
+      return value;
+    } catch (error) {
+      // Keep inference/export functional if native metrics are unavailable.
+      return null;
+    }
+  }
 
   int get totalDetectionCount => _documents.fold<int>(
         0,
@@ -76,6 +120,7 @@ class LocalInferenceService {
     _counter++;
     final requestId = 'local_${_counter.toString().padLeft(4, '0')}';
     final startedAt = DateTime.now().toUtc();
+    final processBefore = await _readProcessMetrics();
     final watch = Stopwatch()..start();
 
     try {
@@ -93,6 +138,10 @@ class LocalInferenceService {
 
       final annotated = result['annotatedImage'] as Uint8List?;
       final completedAt = DateTime.now().toUtc();
+      final processAfter = await _readProcessMetrics();
+      final cpuPercent = _cpuPercent(processBefore, processAfter, elapsed);
+      final memoryBytes = _number(processAfter?['memory_bytes']);
+      final fps = elapsed <= 0 ? 0.0 : 1000.0 / elapsed;
 
       _rows.add(_runRow(
         requestId: requestId,
@@ -115,6 +164,11 @@ class LocalInferenceService {
         'completed_at': completedAt.toIso8601String(),
         'latency_ms': _rounded(elapsed),
         'inference_ms': _rounded(elapsed),
+        'fps': _rounded(fps),
+        'throughput_images_per_second': _rounded(fps),
+        'cpu_usage_percent': cpuPercent == null ? null : _rounded(cpuPercent),
+        'memory_bytes': memoryBytes,
+        'memory_mb': memoryBytes == null ? null : _rounded(memoryBytes / (1024 * 1024)),
         'request_bytes': imageBytes.length,
         'success': true,
         'detection_count': detections.length,
@@ -126,11 +180,15 @@ class LocalInferenceService {
         detections: detections,
         annotatedImage: annotated,
         latencyMs: elapsed,
+        requestId: requestId,
       );
     } catch (error) {
       watch.stop();
       final elapsed = watch.elapsedMicroseconds / 1000.0;
       final completedAt = DateTime.now().toUtc();
+      final processAfter = await _readProcessMetrics();
+      final cpuPercent = _cpuPercent(processBefore, processAfter, elapsed);
+      final memoryBytes = _number(processAfter?['memory_bytes']);
 
       _rows.add(_runRow(
         requestId: requestId,
@@ -153,6 +211,11 @@ class LocalInferenceService {
         'completed_at': completedAt.toIso8601String(),
         'latency_ms': _rounded(elapsed),
         'inference_ms': _rounded(elapsed),
+        'fps': elapsed <= 0 ? 0.0 : _rounded(1000.0 / elapsed),
+        'throughput_images_per_second': elapsed <= 0 ? 0.0 : _rounded(1000.0 / elapsed),
+        'cpu_usage_percent': cpuPercent == null ? null : _rounded(cpuPercent),
+        'memory_bytes': memoryBytes,
+        'memory_mb': memoryBytes == null ? null : _rounded(memoryBytes / (1024 * 1024)),
         'request_bytes': imageBytes.length,
         'success': false,
         'detection_count': 0,
@@ -161,6 +224,55 @@ class LocalInferenceService {
       });
       rethrow;
     }
+  }
+
+  /// Adds screen-level measurements after inference and annotated-image
+  /// rendering have both completed.
+  void completeRunMetrics({
+    required String requestId,
+    required double endToEndMs,
+    required int imageWidth,
+    required int imageHeight,
+    required double annotationMs,
+    required String imageFormat,
+  }) {
+    final index = _documents.indexWhere(
+      (item) => item['request_id'] == requestId,
+    );
+    if (index < 0) return;
+
+    final document = _documents[index];
+    document['end_to_end_ms'] = _rounded(endToEndMs);
+    document['annotation_ms'] = _rounded(annotationMs);
+    document['image_width'] = imageWidth;
+    document['image_height'] = imageHeight;
+    document['image_pixels'] = imageWidth * imageHeight;
+    document['image_megapixels'] =
+        _rounded((imageWidth * imageHeight) / 1000000.0);
+    document['image_format'] = imageFormat;
+    document['throughput_images_per_second'] =
+        endToEndMs <= 0 ? 0.0 : _rounded(1000.0 / endToEndMs);
+    document['latency_ms'] = _rounded(endToEndMs);
+  }
+
+  static num? _number(dynamic value) {
+    if (value is num) return value;
+    return null;
+  }
+
+  static double? _cpuPercent(
+    Map<String, dynamic>? before,
+    Map<String, dynamic>? after,
+    double wallTimeMs,
+  ) {
+    final beforeSeconds = _number(before?['cpu_time_seconds']);
+    final afterSeconds = _number(after?['cpu_time_seconds']);
+    if (beforeSeconds == null || afterSeconds == null || wallTimeMs <= 0) {
+      return null;
+    }
+    final cpuDelta = afterSeconds - beforeSeconds;
+    if (cpuDelta < 0) return null;
+    return (cpuDelta / (wallTimeMs / 1000.0)) * 100.0;
   }
 
   Map<String, dynamic> _runRow({
@@ -184,6 +296,8 @@ class LocalInferenceService {
       'latency_ms': _rounded(elapsedMs),
       // predict() is one plugin operation; native sub-stages are not exposed.
       'inference_ms': _rounded(elapsedMs),
+      'fps': elapsedMs <= 0 ? 0.0 : _rounded(1000.0 / elapsedMs),
+      'throughput_images_per_second': elapsedMs <= 0 ? 0.0 : _rounded(1000.0 / elapsedMs),
       'request_bytes': requestBytes,
       'success': success,
       'detection_count': detectionCount,
@@ -214,6 +328,18 @@ class LocalInferenceService {
       'completed_at',
       'latency_ms',
       'inference_ms',
+      'end_to_end_ms',
+      'annotation_ms',
+      'fps',
+      'throughput_images_per_second',
+      'cpu_usage_percent',
+      'memory_bytes',
+      'memory_mb',
+      'image_width',
+      'image_height',
+      'image_pixels',
+      'image_megapixels',
+      'image_format',
       'request_bytes',
       'success',
       'detection_count',
@@ -306,6 +432,9 @@ class LocalInferenceService {
       'successful_run_count': successfulRunCount,
       'failed_run_count': failedRunCount,
       'total_detection_count': totalDetectionCount,
+      'total_inference_seconds': _rounded(totalInferenceSeconds),
+      'average_fps': _rounded(averageFps),
+      'average_throughput_images_per_second': _rounded(averageThroughput),
       'runs': _documents,
     };
 
