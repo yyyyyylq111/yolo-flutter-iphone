@@ -124,19 +124,33 @@ class LocalInferenceService {
     final watch = Stopwatch()..start();
 
     try {
-      final result = await _yolo.predict(imageBytes);
+      final dynamic rawResult = await _yolo.predict(imageBytes);
       watch.stop();
       final elapsed = watch.elapsedMicroseconds / 1000.0;
 
-      final detections = (result['detections'] as List?)
-              ?.whereType<Map>()
+      if (rawResult is! Map) {
+        throw StateError(
+          'Unexpected YOLO result type: ${rawResult.runtimeType}. '
+          'Expected a result Map containing detections.',
+        );
+      }
+      final result = Map<String, dynamic>.from(rawResult);
+      final rawDetections = result['detections'];
+      final detections = rawDetections is List
+          ? rawDetections
+              .whereType<Map>()
               .map((item) => _normalizeDetection(
                     Map<String, dynamic>.from(item),
                   ))
-              .toList(growable: false) ??
-          const <Map<String, dynamic>>[];
+              .toList(growable: false)
+          : const <Map<String, dynamic>>[];
 
-      final annotated = result['annotatedImage'] as Uint8List?;
+      final dynamic rawAnnotated = result['annotatedImage'];
+      final Uint8List? annotated = rawAnnotated is Uint8List
+          ? rawAnnotated
+          : rawAnnotated is List<int>
+              ? Uint8List.fromList(rawAnnotated)
+              : null;
       final completedAt = DateTime.now().toUtc();
       final processAfter = await _readProcessMetrics();
       final cpuPercent = _cpuPercent(processBefore, processAfter, elapsed);
